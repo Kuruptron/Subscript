@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>In-Browser Transcription & Subtitle Editor</title>
+    <style>
+        body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; background: #f9f9f9; color: #333; }
+        .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 1rem; }
+        button { background: #007bff; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; margin-right: 0.5rem; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        button.export-btn { background: #28a745; }
+        .subtitle-row { display: flex; gap: 1rem; margin-bottom: 1rem; align-items: flex-start; }
+        .time-inputs { display: flex; flex-direction: column; gap: 0.5rem; }
+        input[type="text"], textarea { padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; }
+        textarea { flex-grow: 1; min-height: 60px; resize: vertical; }
+        #status { margin-top: 1rem; font-weight: bold; color: #007bff; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+
+    <div class="card">
+        <h2>🎙️ Audio Transcriber</h2>
+        <p>Runs entirely in your browser. Audio never leaves your device!</p>
+        
+        <input type="file" id="audio-file" accept="audio/mp3, audio/wav, audio/*">
+        <button id="transcribe-btn">Transcribe Audio</button>
+        <div id="status"></div>
+    </div>
+
+    <div class="card hidden" id="editor-section">
+        <h3>📝 Subtitle Editor</h3>
+        <div id="subtitle-container"></div>
+        <hr style="margin: 2rem 0; border: 0; border-top: 1px solid #eee;">
+        <button class="export-btn" id="download-srt">Download SRT</button>
+        <button class="export-btn" id="download-vtt">Download VTT</button>
+    </div>
+
+    <script type="module">
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.0';
+        
+        // Disable local models to ensure it fetches from Hugging Face
+        env.allowLocalModels = false;
+
+        const fileInput = document.getElementById('audio-file');
+        const transcribeBtn = document.getElementById('transcribe-btn');
+        const statusDiv = document.getElementById('status');
+        const editorSection = document.getElementById('editor-section');
+        const subtitleContainer = document.getElementById('subtitle-container');
+        
+        let subtitlesData = [];
+
+        transcribeBtn.addEventListener('click', async () => {
+            const file = fileInput.files[0];
+            if (!file) return alert('Please select an audio file first.');
+
+            try {
+                transcribeBtn.disabled = true;
+                statusDiv.innerText = "Loading AI Model (this takes a moment on first run)...";
+
+                // 1. Load the model
+                const transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
+
+                statusDiv.innerText = "Decoding audio...";
+                
+                // 2. Decode audio to 16kHz float32 array (required by Whisper)
+                const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+                const arrayBuffer = await file.arrayBuffer();
+                const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+                const audioData = audioBuffer.getChannelData(0);
+
+                statusDiv.innerText = "Transcribing... Please wait.";
+
+                // 3. Run transcription
+                const result = await transcriber(audioData, {
+                    chunk_length_s: 30,
+                    return_timestamps: true,
+                });
+
+                subtitlesData = result.chunks || [];
+                renderEditor();
+
+                statusDiv.innerText = "Transcription complete!";
+                editorSection.classList.remove('hidden');
+
+            } catch (err) {
+                console.error(err);
+                statusDiv.innerText = "Error: " + err.message;
+            } finally {
+                transcribeBtn.disabled = false;
+            }
+        });
+
+        // 4. Render the editor UI
+        function renderEditor() {
+            subtitleContainer.innerHTML = '';
+            subtitlesData.forEach((chunk, index) => {
+                const row = document.createElement('div');
+                row.className = 'subtitle-row';
+                
+                // Format timestamps from seconds to 00:00:00.000
+                const startTime = formatTime(chunk.timestamp[0]);
+                const endTime = formatTime(chunk.timestamp[1] || chunk.timestamp[0] + 2); // Fallback if no end time
+
+                row.innerHTML = `
+                    <div class="time-inputs">
+                        <input type="text" id="start-${index}" value="${startTime}" title="Start Time">
+                        <input type="text" id="end-${index}" value="${endTime}" title="End Time">
+                    </div>
+                    <textarea id="text-${index}">${chunk.text.trim()}</textarea>
+                `;
+                subtitleContainer.appendChild(row);
+            });
+        }
+
+        // Helper to convert seconds to HH:MM:SS.mmm
+        function formatTime(seconds) {
+            const date = new Date(seconds * 1000);
+            const hh = String(Math.floor(seconds / 3600)).padStart(2, '0');
+            const mm = String(date.getUTCMinutes()).padStart(2, '0');
+            const ss = String(date.getUTCSeconds()).padStart(2, '0');
+            const mmm = String(date.getUTCMilliseconds()).padStart(3, '0');
+            return `${hh}:${mm}:${ss}.${mmm}`;
+        }
+
+        // 5. Download functions
+        function triggerDownload(content, filename) {
+            const blob = new Blob([content], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Fetch current values from UI before exporting
+        function getCurrentSubtitles() {
+            return subtitlesData.map((_, index) => ({
+                start: document.getElementById(`start-${index}`).value,
+                end: document.getElementById(`end-${index}`).value,
+                text: document.getElementById(`text-${index}`).value
+            }));
+        }
+
+        document.getElementById('download-vtt').addEventListener('click', () => {
+            const subs = getCurrentSubtitles();
+            let vtt = "WEBVTT\n\n";
+            subs.forEach(sub => {
+                vtt += `${sub.start} --> ${sub.end}\n${sub.text}\n\n`;
+            });
+            triggerDownload(vtt, 'subtitles.vtt');
+        });
+
+        document.getElementById('download-srt').addEventListener('click', () => {
+            const subs = getCurrentSubtitles();
+            let srt = "";
+            subs.forEach((sub, index) => {
+                // SRT uses comma instead of period for milliseconds
+                const srtStart = sub.start.replace('.', ',');
+                const srtEnd = sub.end.replace('.', ',');
+                srt += `${index + 1}\n${srtStart} --> ${srtEnd}\n${sub.text}\n\n`;
+            });
+            triggerDownload(srt, 'subtitles.srt');
+        });
+    </script>
+</body>
+</html>
