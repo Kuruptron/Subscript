@@ -12,21 +12,44 @@
         button.export-btn { background: #28a745; }
         .subtitle-row { display: flex; gap: 1rem; margin-bottom: 1rem; align-items: flex-start; }
         .time-inputs { display: flex; flex-direction: column; gap: 0.5rem; }
-        input[type="text"], textarea { padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; }
+        input[type="text"], textarea, input[type="file"] { padding: 0.5rem; border: 1px solid #ccc; border-radius: 4px; }
         textarea { flex-grow: 1; min-height: 60px; resize: vertical; }
         #status { margin-top: 1rem; font-weight: bold; color: #007bff; }
-        .hidden { display: none; }
+        .hidden { display: none !important; }
+        
+        /* Mode Selector Styles */
+        .mode-selector { display: flex; gap: 1rem; margin-bottom: 1.5rem; border-bottom: 2px solid #eee; padding-bottom: 1rem; }
+        .mode-label { cursor: pointer; font-weight: bold; padding: 0.5rem; border-radius: 4px; }
+        .mode-label:has(input:checked) { background: #e9ecef; color: #007bff; }
+        .mode-label input { margin-right: 0.5rem; }
     </style>
 </head>
 <body>
 
     <div class="card">
-        <h2>🎙️ Audio Transcriber</h2>
-        <p>Runs entirely in your browser. Audio never leaves your device!</p>
-        
-        <input type="file" id="audio-file" accept="audio/mp3, audio/wav, audio/*">
-        <button id="transcribe-btn">Transcribe Audio</button>
-        <div id="status"></div>
+        <h2>⚙️ Choose Mode</h2>
+        <div class="mode-selector">
+            <label class="mode-label">
+                <input type="radio" name="app-mode" value="transcribe" checked> Transcribe Audio
+            </label>
+            <label class="mode-label">
+                <input type="radio" name="app-mode" value="edit"> Edit Existing Subtitles
+            </label>
+        </div>
+
+        <div id="transcribe-section">
+            <p>Upload an audio file to generate subtitles locally.</p>
+            <input type="file" id="audio-file" accept="audio/mp3, audio/wav, audio/*">
+            <button id="transcribe-btn">Transcribe Audio</button>
+            <div id="status"></div>
+        </div>
+
+        <div id="edit-upload-section" class="hidden">
+            <p>Upload an existing .srt or .vtt file to edit it manually.</p>
+            <input type="file" id="subtitle-file" accept=".srt, .vtt">
+            <button id="load-subs-btn">Load Subtitles</button>
+            <div id="edit-status" style="margin-top: 1rem; color: #d9534f;"></div>
+        </div>
     </div>
 
     <div class="card hidden" id="editor-section">
@@ -39,51 +62,65 @@
 
     <script type="module">
         import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.0';
-        
-        // Disable local models to ensure it fetches from Hugging Face
         env.allowLocalModels = false;
 
-        const fileInput = document.getElementById('audio-file');
+        // UI Elements
+        const modeRadios = document.querySelectorAll('input[name="app-mode"]');
+        const transcribeSection = document.getElementById('transcribe-section');
+        const editUploadSection = document.getElementById('edit-upload-section');
+        
+        const audioFileInput = document.getElementById('audio-file');
         const transcribeBtn = document.getElementById('transcribe-btn');
         const statusDiv = document.getElementById('status');
+        
+        const subtitleFileInput = document.getElementById('subtitle-file');
+        const loadSubsBtn = document.getElementById('load-subs-btn');
+        const editStatusDiv = document.getElementById('edit-status');
+        
         const editorSection = document.getElementById('editor-section');
         const subtitleContainer = document.getElementById('subtitle-container');
         
         let subtitlesData = [];
 
+        // --- MODE SWITCHING LOGIC ---
+        modeRadios.forEach(radio => {
+            radio.addEventListener('change', (e) => {
+                editorSection.classList.add('hidden'); // Hide editor on mode switch
+                if (e.target.value === 'transcribe') {
+                    transcribeSection.classList.remove('hidden');
+                    editUploadSection.classList.add('hidden');
+                } else {
+                    transcribeSection.classList.add('hidden');
+                    editUploadSection.classList.remove('hidden');
+                }
+            });
+        });
+
+        // --- TRANSCRIBE LOGIC ---
         transcribeBtn.addEventListener('click', async () => {
-            const file = fileInput.files[0];
+            const file = audioFileInput.files[0];
             if (!file) return alert('Please select an audio file first.');
 
             try {
                 transcribeBtn.disabled = true;
                 statusDiv.innerText = "Loading AI Model (this takes a moment on first run)...";
 
-                // 1. Load the model
                 const transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny.en');
 
                 statusDiv.innerText = "Decoding audio...";
-                
-                // 2. Decode audio to 16kHz float32 array (required by Whisper)
                 const audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
                 const arrayBuffer = await file.arrayBuffer();
                 const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
                 const audioData = audioBuffer.getChannelData(0);
 
                 statusDiv.innerText = "Transcribing... Please wait.";
-
-                // 3. Run transcription
-                const result = await transcriber(audioData, {
-                    chunk_length_s: 30,
-                    return_timestamps: true,
-                });
+                const result = await transcriber(audioData, { chunk_length_s: 30, return_timestamps: true });
 
                 subtitlesData = result.chunks || [];
                 renderEditor();
 
                 statusDiv.innerText = "Transcription complete!";
                 editorSection.classList.remove('hidden');
-
             } catch (err) {
                 console.error(err);
                 statusDiv.innerText = "Error: " + err.message;
@@ -92,16 +129,78 @@
             }
         });
 
-        // 4. Render the editor UI
+        // --- LOAD SUBTITLE LOGIC ---
+        loadSubsBtn.addEventListener('click', () => {
+            const file = subtitleFileInput.files[0];
+            if (!file) return alert('Please select a .srt or .vtt file.');
+            editStatusDiv.innerText = '';
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const content = e.target.result;
+                try {
+                    subtitlesData = parseSubtitleFile(content, file.name);
+                    renderEditor();
+                    editorSection.classList.remove('hidden');
+                } catch (err) {
+                    editStatusDiv.innerText = "Failed to parse subtitle file. Ensure it's a valid SRT or VTT.";
+                    console.error(err);
+                }
+            };
+            reader.readAsText(file);
+        });
+
+        // Simple parser for SRT and VTT formats
+        function parseSubtitleFile(content, filename) {
+            const isVTT = filename.toLowerCase().endsWith('.vtt');
+            // Split by double line breaks
+            const blocks = content.trim().split(/\r?\n\r?\n/);
+            const parsed = [];
+
+            for (let block of blocks) {
+                if (isVTT && block.startsWith('WEBVTT')) continue;
+                
+                const lines = block.split(/\r?\n/);
+                // Find the line containing the timecode arrow
+                const timeLineIndex = lines.findIndex(l => l.includes('-->'));
+                if (timeLineIndex === -1) continue;
+
+                const timeLine = lines[timeLineIndex];
+                const [startStr, endStr] = timeLine.split('-->').map(s => s.trim());
+                
+                // Text is everything after the timecode line
+                const text = lines.slice(timeLineIndex + 1).join('\n');
+
+                parsed.push({
+                    timestamp: [timeStrToSeconds(startStr), timeStrToSeconds(endStr)],
+                    text: text
+                });
+            }
+            return parsed;
+        }
+
+        // Convert HH:MM:SS.mmm or HH:MM:SS,mmm to seconds
+        function timeStrToSeconds(str) {
+            const normalized = str.replace(',', '.');
+            const parts = normalized.split(':');
+            let secs = 0;
+            if (parts.length === 3) {
+                secs = parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + parseFloat(parts[2]);
+            } else if (parts.length === 2) {
+                secs = parseInt(parts[0]) * 60 + parseFloat(parts[1]);
+            }
+            return secs;
+        }
+
+        // --- SHARED EDITOR UI LOGIC ---
         function renderEditor() {
             subtitleContainer.innerHTML = '';
             subtitlesData.forEach((chunk, index) => {
                 const row = document.createElement('div');
                 row.className = 'subtitle-row';
                 
-                // Format timestamps from seconds to 00:00:00.000
                 const startTime = formatTime(chunk.timestamp[0]);
-                const endTime = formatTime(chunk.timestamp[1] || chunk.timestamp[0] + 2); // Fallback if no end time
+                const endTime = formatTime(chunk.timestamp[1] || chunk.timestamp[0] + 2);
 
                 row.innerHTML = `
                     <div class="time-inputs">
@@ -114,8 +213,8 @@
             });
         }
 
-        // Helper to convert seconds to HH:MM:SS.mmm
         function formatTime(seconds) {
+            if (isNaN(seconds)) return "00:00:00.000";
             const date = new Date(seconds * 1000);
             const hh = String(Math.floor(seconds / 3600)).padStart(2, '0');
             const mm = String(date.getUTCMinutes()).padStart(2, '0');
@@ -124,7 +223,7 @@
             return `${hh}:${mm}:${ss}.${mmm}`;
         }
 
-        // 5. Download functions
+        // --- EXPORT LOGIC ---
         function triggerDownload(content, filename) {
             const blob = new Blob([content], { type: 'text/plain' });
             const url = URL.createObjectURL(blob);
@@ -135,8 +234,9 @@
             URL.revokeObjectURL(url);
         }
 
-        // Fetch current values from UI before exporting
         function getCurrentSubtitles() {
+            // Need to handle cases where users might add/remove rows in the future.
+            // For now, it maps the exact length of subtitlesData
             return subtitlesData.map((_, index) => ({
                 start: document.getElementById(`start-${index}`).value,
                 end: document.getElementById(`end-${index}`).value,
@@ -157,7 +257,6 @@
             const subs = getCurrentSubtitles();
             let srt = "";
             subs.forEach((sub, index) => {
-                // SRT uses comma instead of period for milliseconds
                 const srtStart = sub.start.replace('.', ',');
                 const srtEnd = sub.end.replace('.', ',');
                 srt += `${index + 1}\n${srtStart} --> ${srtEnd}\n${sub.text}\n\n`;
